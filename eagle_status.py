@@ -28,6 +28,10 @@ OUT_HTML = Path.home() / "Desktop" / "eagle_proxima_status.html"
 SSH_HOST = "assafschuster@eagle.man.poznan.pl"
 SSH_KEY = Path.home() / ".ssh" / "id_ed25519_psnc"
 MY_ACCOUNTS = ("pl0827-01", "pl0910-01")
+# Teammate(s) to highlight separately from "mine" and from everyone else --
+# e.g. so it's obvious at a glance which GPUs a specific collaborator is
+# using, the same way "my" GPUs already get their own border color.
+TRACKED_USER = "yara-sh"
 
 
 def ssh(cmd: str) -> str:
@@ -120,6 +124,7 @@ PALETTE = {
     "drain":    "#d62728",   # red — admin DRAIN / FAIL only
     "down":     "#555555",   # dark gray — DOWN+NOT_RESPONDING (cluster failure, unreachable)
     "myjob":    "#0000d7",   # deep blue — matches H100's MY_BG (ANSI 27)
+    "tracked":  "#e91e8c",   # magenta/pink — TRACKED_USER's GPUs (distinct from all of the above)
 }
 
 
@@ -179,11 +184,12 @@ def categorize_cpu(kv: dict) -> str:
 
 def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
          my_gpu_nodes=None, my_cpu_per_node=None, my_job_nodes=None,
-         my_gpu_counts=None):
+         my_gpu_counts=None, tracked_gpu_counts=None):
     if my_gpu_nodes is None: my_gpu_nodes = set()
     if my_cpu_per_node is None: my_cpu_per_node = {}
     if my_job_nodes is None: my_job_nodes = set()
     if my_gpu_counts is None: my_gpu_counts = {}
+    if tracked_gpu_counts is None: tracked_gpu_counts = {}
     fig = plt.figure(figsize=(15, 11), dpi=120)
     # 3 rows: H100 grid+summary, proxima-cpu grid+summary, jobs.
     # Reservations table dropped — the grid already encodes reservation
@@ -217,6 +223,8 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
             cat = "llm"
         # mine = GPUs on this node that are MINE (0 if none / gpu:0 job)
         mine = my_gpu_counts.get(n["NodeName"], 0) if my_gpu_counts else 0
+        # tracked = GPUs on this node held by TRACKED_USER (0 if none/not applicable)
+        tracked = tracked_gpu_counts.get(n["NodeName"], 0) if tracked_gpu_counts else 0
         # Fill = proportional dark-green bar, bottom-up (alloc/total of the
         # cell height is green; the rest is left white). Replaces the old
         # continuous grayscale fill, which read as a washed-out "light green"
@@ -225,9 +233,17 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         fill_frac = alloc / total if total else 0
         GPU_FILL_GREEN = "#1b5e20"  # dark green -- distinct from PALETTE["free"] border green
         # Blue BORDER = my NODE (#blue-bordered == my node count, incl gpu:0);
-        # the blue COUNT box below = my GPUs (#blue == my GPU count).
+        # the blue COUNT box below = my GPUs (#blue == my GPU count). Magenta
+        # BORDER = TRACKED_USER holds GPUs here (only checked when it isn't
+        # already my node -- mine takes priority if a node is somehow both).
         is_my_node = n["NodeName"] in my_job_nodes
-        edge = PALETTE["myjob"] if is_my_node else PALETTE.get(cat, "#888888")
+        is_tracked_node = (not is_my_node) and tracked > 0
+        if is_my_node:
+            edge = PALETTE["myjob"]
+        elif is_tracked_node:
+            edge = PALETTE["tracked"]
+        else:
+            edge = PALETTE.get(cat, "#888888")
         cell_x, cell_y, cell_w, cell_h = x + 0.08, y + 0.08, 0.84, 0.84
         fill_top = cell_y + cell_h * fill_frac  # abs y where green stops (white above)
         if fill_frac > 0:
@@ -236,7 +252,7 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         rect = Rectangle((cell_x, cell_y), cell_w, cell_h,
                          facecolor="none",
                          edgecolor=edge,
-                         linewidth=3.0 if is_my_node else 2.5,
+                         linewidth=3.0 if (is_my_node or is_tracked_node) else 2.5,
                          zorder=2)
         ax_grid.add_patch(rect)
         # Node label -- color picked per-label based on whether IT specifically
@@ -247,11 +263,17 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         label_color = "white" if node_label_y < fill_top else "black"
         ax_grid.text(x + 0.5, node_label_y, nid, ha="center", va="center",
                      fontsize=8, color=label_color, fontweight="bold")
-        # Count line: "mine/total" in blue when I have GPUs here, else "alloc/total".
+        # Count line: "mine/total" in blue when I have GPUs here; "tracked/total"
+        # in magenta when TRACKED_USER does (and I don't); else "alloc/total".
         if mine > 0:
             ax_grid.text(x + 0.5, y + 0.30, f"{mine}/{total}", ha="center", va="center",
                          fontsize=7, color="white", fontweight="bold",
                          bbox=dict(boxstyle="square,pad=0.12", facecolor=PALETTE["myjob"],
+                                   edgecolor="none"))
+        elif tracked > 0:
+            ax_grid.text(x + 0.5, y + 0.30, f"{tracked}/{total}", ha="center", va="center",
+                         fontsize=7, color="white", fontweight="bold",
+                         bbox=dict(boxstyle="square,pad=0.12", facecolor=PALETTE["tracked"],
                                    edgecolor="none"))
         else:
             count_label_y = y + 0.32
@@ -279,9 +301,10 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         patches.Patch(facecolor=PALETTE["reserved"], edgecolor="black", linewidth=1, label="other-reserved"),
         patches.Patch(facecolor=PALETTE["drain"], edgecolor="black", linewidth=1, label="drain/down"),
         patches.Patch(facecolor="white", edgecolor=PALETTE["myjob"], linewidth=2.5, label="my GPUs (blue border + count)"),
+        patches.Patch(facecolor="white", edgecolor=PALETTE["tracked"], linewidth=2.5, label=f"{TRACKED_USER}'s GPUs"),
     ]
     ax_grid.legend(handles=h100_legend, loc="upper center",
-                   bbox_to_anchor=(0.5, -0.02), ncol=5, fontsize=8,
+                   bbox_to_anchor=(0.5, -0.02), ncol=6, fontsize=8,
                    frameon=False, handlelength=2.5, handleheight=1.6)
 
     # --- Summary stats ---
@@ -962,7 +985,8 @@ def gather_my_gpu_util(my_jobids: list) -> list:
 
 def gather():
     """Run the SSH queries and parse. Returns
-    (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus_per_node, gpu_util_rows)."""
+    (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus_per_node, gpu_util_rows,
+     my_cpu_cores_per_node, my_job_nodes, tracked_gpus_per_node)."""
     node_text = ssh("scontrol -o show node")
     rsv_text = ssh("scontrol -o show reservations")
     sq_text = ssh('squeue -u $USER --states=PENDING,RUNNING -o "%i|%T|%j|%P|%D|%M|%R" -h')
@@ -971,6 +995,7 @@ def gather():
     # Use both: %C is reliable across SLURM versions for cpu per-node math
     # (we divide by node count); %b is the only way to get :h100:N GPU count.
     my_run_text = ssh('squeue -u $USER -t RUNNING -h -o "%i|%N|%C|%b"')
+    tracked_run_text = ssh(f'squeue -u {TRACKED_USER} -t RUNNING -h -o "%N|%b"')
 
     nodes = parse_nodes(node_text)
     rsvs = parse_reservations(rsv_text)
@@ -1029,8 +1054,27 @@ def gather():
 
     gpu_util_rows = gather_my_gpu_util(my_running_jobids) if my_running_jobids else []
 
+    # TRACKED_USER's currently-running GPUs, same parsing as the "mine" block
+    # above but simpler (no job table / CPU accounting needed for them).
+    tracked_gpus_per_node: dict = {}
+    for line in tracked_run_text.strip().splitlines():
+        parts = line.split("|", 1)
+        if len(parts) < 2:
+            continue
+        nodelist, tres = parts
+        if not nodelist.strip():
+            continue
+        gpu_m = re.search(r"gpu(?::h100)?:(\d+)", tres)
+        gpus_per_node = int(gpu_m.group(1)) if gpu_m else 0
+        if gpus_per_node == 0:
+            continue
+        for nm in expand_nodelist(nodelist):
+            if nm in gpu_node_names:
+                tracked_gpus_per_node[nm] = tracked_gpus_per_node.get(nm, 0) + gpus_per_node
+
     return (nodes, rsvs, myjobs, blocking, llm_nodes,
-            my_gpus_per_node, gpu_util_rows, my_cpu_cores_per_node, my_job_nodes)
+            my_gpus_per_node, gpu_util_rows, my_cpu_cores_per_node, my_job_nodes,
+            tracked_gpus_per_node)
 
 
 def main():
@@ -1044,9 +1088,10 @@ def main():
 
     if args.watch <= 0:
         # One-shot: just the PNG.
-        nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes = gather()
+        nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes, tracked_gpus = gather()
         draw(nodes, rsvs, myjobs, blocking, llm_nodes,
-             my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus)
+             my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
+             tracked_gpu_counts=tracked_gpus)
         print(f"Wrote {OUT_PNG}", file=sys.stderr)
         subprocess.run(["open", str(OUT_PNG)], check=False)
         return
@@ -1056,15 +1101,16 @@ def main():
     try:
         while True:
             try:
-                data = gather()  # 9-tuple
-                nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes = data
+                data = gather()  # 10-tuple
+                nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes, tracked_gpus = data
                 # render_tui still uses 7-arg legacy signature for back-compat.
                 render_tui(nodes, rsvs, myjobs, blocking, llm_nodes,
                            my_gpus, util, refresh_secs=args.watch,
                            my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes)
                 if not args.no_png:
                     draw(nodes, rsvs, myjobs, blocking, llm_nodes,
-                         my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus)
+                         my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
+                         tracked_gpu_counts=tracked_gpus)
             except subprocess.CalledProcessError as e:
                 sys.stderr.write(f"\n[WARN {dt.datetime.now():%H:%M:%S}] "
                                  f"ssh failed: {e}\n")
