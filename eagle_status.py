@@ -483,14 +483,21 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         _usage_row(f"Me ({MY_USERNAME})", my_usage_cost),
         _usage_row(TRACKED_USER, tracked_usage_cost),
     ]
-    tbl_usage = ax_usage.table(cellText=usage_rows, loc="upper left", cellLoc="center",
+    tbl_usage = ax_usage.table(cellText=usage_rows, loc="upper left", cellLoc="right",
                                colWidths=[0.10, 0.075, 0.075, 0.08, 0.08, 0.075, 0.075, 0.08, 0.08, 0.075, 0.075, 0.08, 0.08])
     tbl_usage.auto_set_font_size(False)
     tbl_usage.set_fontsize(8)
     tbl_usage.scale(1, 1.8)
-    for i in range(len(usage_rows[0])):
+    n_usage_cols = len(usage_rows[0])
+    for (r, c), cell in tbl_usage.get_celld().items():
+        cell.set_text_props(family="monospace")
+        if c == 0:
+            cell.set_text_props(family="sans-serif", ha="left")
+    for i in range(n_usage_cols):
         tbl_usage[0, i].set_facecolor("#dddddd")
         tbl_usage[0, i].set_text_props(fontweight="bold")
+        if i > 0:
+            tbl_usage[0, i].set_text_props(family="monospace", ha="right")
     ax_usage.set_title(
         "GPU/CPU usage & cost (sacct, trailing windows from now — both rates are confirmed real "
         "PSNC prices: €2.00/GPU-hour, 1 zł/CPU-hour — shown separately, not converted/summed, "
@@ -1013,13 +1020,13 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
     out.append("\x1b[1mGPU/CPU usage & cost\x1b[0m  "
                "(both rates confirmed real PSNC prices: €2.00/GPU-hr, 1 zł/CPU-hr -- "
                "shown separately, not converted/summed):")
-    out.append(f"  {'':<16} {'Day GPU-hr':>10} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}   "
+    out.append(f"  {'':<20} {'Day GPU-hr':>10} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}   "
                f"{'Week GPU-hr':>11} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}   "
                f"{'Month GPU-hr':>12} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}")
     for label, cost in [(f"Me ({MY_USERNAME})", my_usage_cost), (TRACKED_USER, tracked_usage_cost)]:
         d, w, m = cost.get("day", {}), cost.get("week", {}), cost.get("month", {})
         out.append(
-            f"  {label:<16} "
+            f"  {label:<20} "
             f"{d.get('gpu_hr', 0):>10.2f} {d.get('cpu_hr', 0):>7.1f} "
             f"{d.get('gpu_cost_eur', 0):>7.2f}€ {d.get('cpu_cost_pln', 0):>7.2f}zł   "
             f"{w.get('gpu_hr', 0):>11.2f} {w.get('cpu_hr', 0):>7.1f} "
