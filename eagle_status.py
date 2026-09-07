@@ -184,12 +184,13 @@ def categorize_cpu(kv: dict) -> str:
 
 def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
          my_gpu_nodes=None, my_cpu_per_node=None, my_job_nodes=None,
-         my_gpu_counts=None, tracked_gpu_counts=None):
+         my_gpu_counts=None, tracked_gpu_counts=None, tracked_cpu_per_node=None):
     if my_gpu_nodes is None: my_gpu_nodes = set()
     if my_cpu_per_node is None: my_cpu_per_node = {}
     if my_job_nodes is None: my_job_nodes = set()
     if my_gpu_counts is None: my_gpu_counts = {}
     if tracked_gpu_counts is None: tracked_gpu_counts = {}
+    if tracked_cpu_per_node is None: tracked_cpu_per_node = {}
     fig = plt.figure(figsize=(15, 11), dpi=120)
     # 3 rows: H100 grid+summary, proxima-cpu grid+summary, jobs.
     # Reservations table dropped — the grid already encodes reservation
@@ -376,12 +377,20 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         fill_frac = alloc / total if total else 0
         # Same darkness rule as H100: 0 alloc → white, full → black.
         gray = 1.0 - fill_frac
-        # "my job" overrides border color (uses unique pink — no diamond needed).
-        edge = PALETTE["myjob"] if n["NodeName"] in my_cpu_per_node else CPU_EDGE[cat]
+        # "my job" overrides border color to blue; TRACKED_USER's job (when
+        # the node isn't already mine) overrides it to magenta instead.
+        is_my_cpu_node = n["NodeName"] in my_cpu_per_node
+        is_tracked_cpu_node = (not is_my_cpu_node) and n["NodeName"] in tracked_cpu_per_node
+        if is_my_cpu_node:
+            edge = PALETTE["myjob"]
+        elif is_tracked_cpu_node:
+            edge = PALETTE["tracked"]
+        else:
+            edge = CPU_EDGE[cat]
         rect = Rectangle((x + 0.08, y + 0.08), 0.84, 0.84,
                          facecolor=(gray, gray, gray),
                          edgecolor=edge,
-                         linewidth=3.0 if n["NodeName"] in my_cpu_per_node else 2.5)
+                         linewidth=3.0 if (is_my_cpu_node or is_tracked_cpu_node) else 2.5)
         ax_cpu_grid.add_patch(rect)
         nid = re.sub(r"^[a-zA-Z]+", "", n["NodeName"])  # e.g. "e2412" → "2412"
         label_color = "white" if fill_frac > 0.55 else "black"
@@ -406,6 +415,7 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
         patches.Patch(facecolor=PALETTE["drain"],    edgecolor="black", linewidth=1, label="drain/fail"),
         patches.Patch(facecolor=PALETTE["down"],     edgecolor="black", linewidth=1, label="down/unresponsive"),
         patches.Patch(facecolor=PALETTE["myjob"],    edgecolor="black", linewidth=1, label="my job here"),
+        patches.Patch(facecolor=PALETTE["tracked"],  edgecolor="black", linewidth=1, label=f"{TRACKED_USER}'s job"),
     ]
     ax_cpu_grid.legend(handles=cpu_legend, loc="upper center",
                        bbox_to_anchor=(0.5, -0.02), ncol=4, fontsize=9,
@@ -631,7 +641,7 @@ def render_cell(n: dict, llm_nodes: set, my_gpus_per_node: dict,
     return top, mid1, mid2, bottom
 
 
-def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]:
+def render_cpu_cell(n: dict, my_cpu_per_node: dict, tracked_cpu_per_node: dict = None) -> tuple[str, str, str, str]:
     """Render one proxima-cpu node as 4 ANSI strings (top, mid1, mid2, bottom).
     Same 4-line bordered-cell convention as render_cell, but for CPU cores
     instead of GPUs:
@@ -640,9 +650,13 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]
       - my_cpu_per_node: dict {node_name: cpus_allocated_to_me} — used to
         proportionally fill the cell (my-cores blue, others' cores in
         category color, free cores white) and to override border color.
+      - tracked_cpu_per_node: same idea for TRACKED_USER (magenta), checked
+        only when the node isn't already mine.
       - border color encoded by category (yellow=schedulable, blue=maint,
         orange=resv, red=drain)
     """
+    if tracked_cpu_per_node is None:
+        tracked_cpu_per_node = {}
     nid = re.sub(r"^[a-zA-Z]+", "", n["NodeName"])   # "e2412" → "2412"
     alloc, total = cpu_alloc(n)
     cat = categorize_cpu(n)
@@ -650,12 +664,17 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]
         cat = "free"
     my_cores = my_cpu_per_node.get(n["NodeName"], 0)
     is_mine = my_cores > 0
-    # "my job" overrides only the BORDER color to blue (so it's spottable).
-    # Interior fill is proportional: my-cores get blue cells, OTHER users'
-    # cores keep the category bg color, free cores stay white. This way the
-    # cell tells the user "how much of this node is actually mine".
+    tracked_cores = 0 if is_mine else tracked_cpu_per_node.get(n["NodeName"], 0)
+    is_tracked = tracked_cores > 0
+    # "my job" / "tracked job" override only the BORDER color (so it's
+    # spottable). Interior fill is proportional: my-cores blue, tracked-cores
+    # magenta, OTHER users' cores keep the category bg color, free cores stay
+    # white. This way the cell tells the user "how much of this node is
+    # actually mine / TRACKED_USER's".
     if is_mine:
         fg = "\x1b[38;5;27m"
+    elif is_tracked:
+        fg = TRACKED_FG
     else:
         fg = CPU_FG[cat]
     bg = CPU_BG[cat]
@@ -668,34 +687,41 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]
     top = f"{BOLD}{fg}┏{top_interior}┓{ANSI_RESET}"
 
     # Interior: 4 chars × 2 lines.
-    # mid1 = proportional color fill (mine/others/free in real proportions).
+    # mid1 = proportional color fill (mine/tracked/others/free in real proportions).
     # mid2 = numeric "alloc/total" — bold black on white — so the user can
     #        read off the exact core count without counting blocks.
-    other_cores = max(0, alloc - my_cores)
+    other_cores = max(0, alloc - my_cores - tracked_cores)
     # Round each band to an integer number of 4 cells; reconcile any drift
     # by handing the remainder to the free band.
     n_mine_fill = 0 if total == 0 else min(INTERIOR_W, round(my_cores * INTERIOR_W / total))
-    n_others    = 0 if total == 0 else min(INTERIOR_W - n_mine_fill,
+    n_tracked_fill = 0 if total == 0 else min(INTERIOR_W - n_mine_fill,
+                                               round(tracked_cores * INTERIOR_W / total))
+    n_others    = 0 if total == 0 else min(INTERIOR_W - n_mine_fill - n_tracked_fill,
                                             round(other_cores * INTERIOR_W / total))
-    # If any cores are alloc'd but rounding sent both bands to 0, force ≥1 cell.
-    if alloc > 0 and n_mine_fill == 0 and n_others == 0:
-        if my_cores >= other_cores:
+    # If any cores are alloc'd but rounding sent every band to 0, force the
+    # largest real band to show at least 1 cell.
+    if alloc > 0 and n_mine_fill == 0 and n_tracked_fill == 0 and n_others == 0:
+        largest = max(my_cores, tracked_cores, other_cores)
+        if largest == my_cores:
             n_mine_fill = 1
+        elif largest == tracked_cores:
+            n_tracked_fill = 1
         else:
             n_others = 1
-    n_free = INTERIOR_W - n_mine_fill - n_others
+    n_free = INTERIOR_W - n_mine_fill - n_tracked_fill - n_others
 
-    # Unavailable nodes (drain/down/maint/reserved, not mine): stamp big black X.
-    is_unavail = cat != "free" and not is_mine
+    # Unavailable nodes (drain/down/maint/reserved, not mine/tracked): stamp big black X.
+    is_unavail = cat != "free" and not is_mine and not is_tracked
     if is_unavail:
         mid1 = f"{BOLD}{fg}┃{ANSI_RESET}{bg}{BOLD}\x1b[38;5;16mX  X{ANSI_RESET}{BOLD}{fg}┃{ANSI_RESET}"
         mid2 = f"{BOLD}{fg}┃{ANSI_RESET}{bg}{BOLD}\x1b[38;5;16m XX {ANSI_RESET}{BOLD}{fg}┃{ANSI_RESET}"
     else:
-        # mid1: proportional fill — mine in blue, others in cat-bg, free in white.
-        fill_my    = (MY_BG    + " " * n_mine_fill + ANSI_RESET) if n_mine_fill else ""
-        fill_other = (bg       + " " * n_others    + ANSI_RESET) if n_others    else ""
-        fill_free  = (WHITE_BG + " " * n_free      + ANSI_RESET) if n_free      else ""
-        mid1 = f"{BOLD}{fg}┃{ANSI_RESET}{fill_my}{fill_other}{fill_free}{BOLD}{fg}┃{ANSI_RESET}"
+        # mid1: proportional fill — mine in blue, tracked in magenta, others in cat-bg, free in white.
+        fill_my      = (MY_BG      + " " * n_mine_fill    + ANSI_RESET) if n_mine_fill    else ""
+        fill_tracked = (TRACKED_BG + " " * n_tracked_fill + ANSI_RESET) if n_tracked_fill else ""
+        fill_other   = (bg         + " " * n_others       + ANSI_RESET) if n_others       else ""
+        fill_free    = (WHITE_BG   + " " * n_free         + ANSI_RESET) if n_free         else ""
+        mid1 = f"{BOLD}{fg}┃{ANSI_RESET}{fill_my}{fill_tracked}{fill_other}{fill_free}{BOLD}{fg}┃{ANSI_RESET}"
         # mid2: alloc count, bold black on white — fits 0–999 in 4 chars.
         count_str = f"{alloc:>4d}"
         mid2 = (f"{BOLD}{fg}┃{ANSI_RESET}"
@@ -708,13 +734,16 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]
 
 def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
                my_gpus_per_node, gpu_util_rows, refresh_secs,
-               my_cpu_per_node=None, my_job_nodes=None, tracked_gpus_per_node=None):
+               my_cpu_per_node=None, my_job_nodes=None, tracked_gpus_per_node=None,
+               tracked_cpu_per_node=None):
     if my_cpu_per_node is None:
         my_cpu_per_node = {}
     if my_job_nodes is None:
         my_job_nodes = set()
     if tracked_gpus_per_node is None:
         tracked_gpus_per_node = {}
+    if tracked_cpu_per_node is None:
+        tracked_cpu_per_node = {}
     """Render the cluster grid + single-line stacked totals + reservations
     + my jobs. Each node is a 4-line bordered box with edge-to-edge fill."""
     gpu_nodes = [n for n in nodes_data if "h100" in n.get("Gres", "")]
@@ -854,7 +883,7 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
                     blank = " " * 7   # 6 cell + 1 gap
                     l1 += blank; l2 += blank; l3 += blank; l4 += blank
                     continue
-                t, m1, m2, b = render_cpu_cell(cpu_nodes[idx], my_cpu_per_node)
+                t, m1, m2, b = render_cpu_cell(cpu_nodes[idx], my_cpu_per_node, tracked_cpu_per_node)
                 l1 += t + " "
                 l2 += m1 + " "
                 l3 += m2 + " "
@@ -914,6 +943,7 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
             if cnt <= 0 and i > 0: continue
             legend_parts_c.append(f"{color}  {ANSI_RESET} {lab}")
         legend_parts_c.append(f"{MY_BG}  {ANSI_RESET} my job")
+        legend_parts_c.append(f"{TRACKED_BG}  {ANSI_RESET} {TRACKED_USER} job")
         legend_line_c = "   ".join(legend_parts_c)
         # Legend sits ABOVE the bar title (right under the CPU grid).
         out.append(legend_line_c)
@@ -1004,7 +1034,7 @@ def gather_my_gpu_util(my_jobids: list) -> list:
 def gather():
     """Run the SSH queries and parse. Returns
     (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus_per_node, gpu_util_rows,
-     my_cpu_cores_per_node, my_job_nodes, tracked_gpus_per_node)."""
+     my_cpu_cores_per_node, my_job_nodes, tracked_gpus_per_node, tracked_cpu_per_node)."""
     node_text = ssh("scontrol -o show node")
     rsv_text = ssh("scontrol -o show reservations")
     sq_text = ssh('squeue -u $USER --states=PENDING,RUNNING -o "%i|%T|%j|%P|%D|%M|%R" -h')
@@ -1013,7 +1043,7 @@ def gather():
     # Use both: %C is reliable across SLURM versions for cpu per-node math
     # (we divide by node count); %b is the only way to get :h100:N GPU count.
     my_run_text = ssh('squeue -u $USER -t RUNNING -h -o "%i|%N|%C|%b"')
-    tracked_run_text = ssh(f'squeue -u {TRACKED_USER} -t RUNNING -h -o "%N|%b"')
+    tracked_run_text = ssh(f'squeue -u {TRACKED_USER} -t RUNNING -h -o "%N|%C|%b"')
 
     nodes = parse_nodes(node_text)
     rsvs = parse_reservations(rsv_text)
@@ -1072,27 +1102,36 @@ def gather():
 
     gpu_util_rows = gather_my_gpu_util(my_running_jobids) if my_running_jobids else []
 
-    # TRACKED_USER's currently-running GPUs, same parsing as the "mine" block
-    # above but simpler (no job table / CPU accounting needed for them).
+    # TRACKED_USER's currently-running GPUs + CPU cores, same parsing pattern
+    # as the "mine" block above (job table / per-job GPU accounting isn't
+    # needed for them since they only ever get a border/fill highlight, not
+    # a jobs table row).
     tracked_gpus_per_node: dict = {}
+    tracked_cpu_per_node: dict = {}
     for line in tracked_run_text.strip().splitlines():
-        parts = line.split("|", 1)
-        if len(parts) < 2:
+        parts = line.split("|", 2)
+        if len(parts) < 3:
             continue
-        nodelist, tres = parts
+        nodelist, total_cpus_s, tres = parts
         if not nodelist.strip():
             continue
         gpu_m = re.search(r"gpu(?::h100)?:(\d+)", tres)
         gpus_per_node = int(gpu_m.group(1)) if gpu_m else 0
-        if gpus_per_node == 0:
-            continue
-        for nm in expand_nodelist(nodelist):
-            if nm in gpu_node_names:
+        try:
+            total_cpus = int(total_cpus_s)
+        except ValueError:
+            total_cpus = 0
+        nodes_expanded = expand_nodelist(nodelist)
+        cpus_per_node = total_cpus // max(1, len(nodes_expanded)) if total_cpus else 0
+        for nm in nodes_expanded:
+            if gpus_per_node > 0 and nm in gpu_node_names:
                 tracked_gpus_per_node[nm] = tracked_gpus_per_node.get(nm, 0) + gpus_per_node
+            if nm in cpu_node_names and cpus_per_node > 0:
+                tracked_cpu_per_node[nm] = tracked_cpu_per_node.get(nm, 0) + cpus_per_node
 
     return (nodes, rsvs, myjobs, blocking, llm_nodes,
             my_gpus_per_node, gpu_util_rows, my_cpu_cores_per_node, my_job_nodes,
-            tracked_gpus_per_node)
+            tracked_gpus_per_node, tracked_cpu_per_node)
 
 
 def main():
@@ -1106,10 +1145,10 @@ def main():
 
     if args.watch <= 0:
         # One-shot: just the PNG.
-        nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes, tracked_gpus = gather()
+        nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes, tracked_gpus, tracked_cpu = gather()
         draw(nodes, rsvs, myjobs, blocking, llm_nodes,
              my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
-             tracked_gpu_counts=tracked_gpus)
+             tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
         print(f"Wrote {OUT_PNG}", file=sys.stderr)
         subprocess.run(["open", str(OUT_PNG)], check=False)
         return
@@ -1119,16 +1158,16 @@ def main():
     try:
         while True:
             try:
-                data = gather()  # 10-tuple
-                nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes, tracked_gpus = data
+                data = gather()  # 11-tuple
+                nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes, tracked_gpus, tracked_cpu = data
                 render_tui(nodes, rsvs, myjobs, blocking, llm_nodes,
                            my_gpus, util, refresh_secs=args.watch,
                            my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes,
-                           tracked_gpus_per_node=tracked_gpus)
+                           tracked_gpus_per_node=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
                 if not args.no_png:
                     draw(nodes, rsvs, myjobs, blocking, llm_nodes,
                          my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
-                         tracked_gpu_counts=tracked_gpus)
+                         tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
             except subprocess.CalledProcessError as e:
                 sys.stderr.write(f"\n[WARN {dt.datetime.now():%H:%M:%S}] "
                                  f"ssh failed: {e}\n")
