@@ -34,13 +34,14 @@ MY_USERNAME = "assafschuster"   # matches SSH_HOST's login -- used for sacct usa
 # using, the same way "my" GPUs already get their own border color.
 TRACKED_USER = "yara-sh"
 
-# GPU-hour billing rate is real (confirmed PSNC rate). The CPU-hour rate is
-# NOT a confirmed PSNC figure -- there is no published per-core-hour price --
-# it's set here per an explicit 2026-09-07 instruction to use 1/10th of the
-# GPU rate as a working assumption. Treat any CPU $$ shown as illustrative,
-# not a real invoice number, until a real rate is confirmed.
-GPU_RATE_EUR = 2.0
-CPU_RATE_EUR = GPU_RATE_EUR / 10
+# Both rates are now confirmed real PSNC prices (as of 2026-09-07) -- note
+# they're in DIFFERENT currencies and are deliberately NOT converted/summed
+# into one blended figure, since that would require guessing an exchange
+# rate (introducing exactly the kind of unconfirmed number this is trying
+# to avoid). GPU cost and CPU cost are reported side by side, each in its
+# own real currency.
+GPU_RATE_EUR = 2.0    # per GPU-hour
+CPU_RATE_PLN = 1.0    # per CPU-hour (Polish zloty)
 
 
 def ssh(cmd: str) -> str:
@@ -468,27 +469,32 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
     def _usage_row(label, cost):
         d = cost.get("day", {}); w = cost.get("week", {}); m = cost.get("month", {})
         return [label,
-                f"{d.get('gpu_hr', 0):.2f}", f"{d.get('cpu_hr', 0):.1f}", f"€{d.get('cost_eur', 0):.2f}",
-                f"{w.get('gpu_hr', 0):.2f}", f"{w.get('cpu_hr', 0):.1f}", f"€{w.get('cost_eur', 0):.2f}",
-                f"{m.get('gpu_hr', 0):.2f}", f"{m.get('cpu_hr', 0):.1f}", f"€{m.get('cost_eur', 0):.2f}"]
+                f"{d.get('gpu_hr', 0):.2f}", f"{d.get('cpu_hr', 0):.1f}",
+                f"€{d.get('gpu_cost_eur', 0):.2f}", f"{d.get('cpu_cost_pln', 0):.2f}zł",
+                f"{w.get('gpu_hr', 0):.2f}", f"{w.get('cpu_hr', 0):.1f}",
+                f"€{w.get('gpu_cost_eur', 0):.2f}", f"{w.get('cpu_cost_pln', 0):.2f}zł",
+                f"{m.get('gpu_hr', 0):.2f}", f"{m.get('cpu_hr', 0):.1f}",
+                f"€{m.get('gpu_cost_eur', 0):.2f}", f"{m.get('cpu_cost_pln', 0):.2f}zł"]
 
     usage_rows = [
-        ["User", "Day GPU-hr", "Day CPU-hr", "Day €",
-         "Week GPU-hr", "Week CPU-hr", "Week €",
-         "Month GPU-hr", "Month CPU-hr", "Month €"],
+        ["User", "Day\nGPU-hr", "Day\nCPU-hr", "Day\n€ (GPU)", "Day\nzł (CPU)",
+         "Week\nGPU-hr", "Week\nCPU-hr", "Week\n€ (GPU)", "Week\nzł (CPU)",
+         "Month\nGPU-hr", "Month\nCPU-hr", "Month\n€ (GPU)", "Month\nzł (CPU)"],
         _usage_row(f"Me ({MY_USERNAME})", my_usage_cost),
         _usage_row(TRACKED_USER, tracked_usage_cost),
     ]
     tbl_usage = ax_usage.table(cellText=usage_rows, loc="upper left", cellLoc="center",
-                               colWidths=[0.12, 0.10, 0.10, 0.08, 0.10, 0.10, 0.08, 0.10, 0.10, 0.08])
+                               colWidths=[0.10, 0.075, 0.075, 0.08, 0.08, 0.075, 0.075, 0.08, 0.08, 0.075, 0.075, 0.08, 0.08])
     tbl_usage.auto_set_font_size(False)
-    tbl_usage.set_fontsize(8.5)
+    tbl_usage.set_fontsize(8)
+    tbl_usage.scale(1, 1.8)
     for i in range(len(usage_rows[0])):
         tbl_usage[0, i].set_facecolor("#dddddd")
         tbl_usage[0, i].set_text_props(fontweight="bold")
     ax_usage.set_title(
-        "GPU/CPU usage & cost (sacct, trailing windows from now — GPU rate €2.00/hr confirmed; "
-        "CPU rate €0.20/hr is an ASSUMPTION, not a confirmed PSNC price)",
+        "GPU/CPU usage & cost (sacct, trailing windows from now — both rates are confirmed real "
+        "PSNC prices: €2.00/GPU-hour, 1 zł/CPU-hour — shown separately, not converted/summed, "
+        "since combining currencies would need a guessed exchange rate)",
         fontsize=9, loc="left")
 
     # --- My jobs ---
@@ -1005,17 +1011,21 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
 
     # GPU/CPU usage & cost (sacct, trailing day/week/month from now)
     out.append("\x1b[1mGPU/CPU usage & cost\x1b[0m  "
-               "(GPU €2.00/hr confirmed; CPU €0.20/hr is an ASSUMPTION, not a confirmed PSNC price):")
-    out.append(f"  {'':<16} {'Day GPU-hr':>10} {'CPU-hr':>8} {'€':>8}   "
-               f"{'Week GPU-hr':>11} {'CPU-hr':>8} {'€':>8}   "
-               f"{'Month GPU-hr':>12} {'CPU-hr':>8} {'€':>8}")
+               "(both rates confirmed real PSNC prices: €2.00/GPU-hr, 1 zł/CPU-hr -- "
+               "shown separately, not converted/summed):")
+    out.append(f"  {'':<16} {'Day GPU-hr':>10} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}   "
+               f"{'Week GPU-hr':>11} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}   "
+               f"{'Month GPU-hr':>12} {'CPU-hr':>7} {'€(GPU)':>8} {'zł(CPU)':>9}")
     for label, cost in [(f"Me ({MY_USERNAME})", my_usage_cost), (TRACKED_USER, tracked_usage_cost)]:
         d, w, m = cost.get("day", {}), cost.get("week", {}), cost.get("month", {})
         out.append(
             f"  {label:<16} "
-            f"{d.get('gpu_hr', 0):>10.2f} {d.get('cpu_hr', 0):>8.1f} {d.get('cost_eur', 0):>7.2f}€   "
-            f"{w.get('gpu_hr', 0):>11.2f} {w.get('cpu_hr', 0):>8.1f} {w.get('cost_eur', 0):>7.2f}€   "
-            f"{m.get('gpu_hr', 0):>12.2f} {m.get('cpu_hr', 0):>8.1f} {m.get('cost_eur', 0):>7.2f}€")
+            f"{d.get('gpu_hr', 0):>10.2f} {d.get('cpu_hr', 0):>7.1f} "
+            f"{d.get('gpu_cost_eur', 0):>7.2f}€ {d.get('cpu_cost_pln', 0):>7.2f}zł   "
+            f"{w.get('gpu_hr', 0):>11.2f} {w.get('cpu_hr', 0):>7.1f} "
+            f"{w.get('gpu_cost_eur', 0):>7.2f}€ {w.get('cpu_cost_pln', 0):>7.2f}zł   "
+            f"{m.get('gpu_hr', 0):>12.2f} {m.get('cpu_hr', 0):>7.1f} "
+            f"{m.get('gpu_cost_eur', 0):>7.2f}€ {m.get('cpu_cost_pln', 0):>7.2f}zł")
     out.append("")
 
     # My jobs
@@ -1129,7 +1139,8 @@ def gather_usage_cost(username: str) -> dict:
                 totals[wname]["cpu_hr"] += n_cpu * elapsed / 3600.0
     for w in totals:
         g, c = totals[w]["gpu_hr"], totals[w]["cpu_hr"]
-        totals[w]["cost_eur"] = g * GPU_RATE_EUR + c * CPU_RATE_EUR
+        totals[w]["gpu_cost_eur"] = g * GPU_RATE_EUR
+        totals[w]["cpu_cost_pln"] = c * CPU_RATE_PLN
     return totals
 
 
