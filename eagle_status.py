@@ -28,10 +28,19 @@ OUT_HTML = Path.home() / "Desktop" / "eagle_proxima_status.html"
 SSH_HOST = "assafschuster@eagle.man.poznan.pl"
 SSH_KEY = Path.home() / ".ssh" / "id_ed25519_psnc"
 MY_ACCOUNTS = ("pl0827-01", "pl0910-01")
+MY_USERNAME = "assafschuster"   # matches SSH_HOST's login -- used for sacct usage/cost lookups
 # Teammate(s) to highlight separately from "mine" and from everyone else --
 # e.g. so it's obvious at a glance which GPUs a specific collaborator is
 # using, the same way "my" GPUs already get their own border color.
 TRACKED_USER = "yara-sh"
+
+# GPU-hour billing rate is real (confirmed PSNC rate). The CPU-hour rate is
+# NOT a confirmed PSNC figure -- there is no published per-core-hour price --
+# it's set here per an explicit 2026-09-07 instruction to use 1/10th of the
+# GPU rate as a working assumption. Treat any CPU $$ shown as illustrative,
+# not a real invoice number, until a real rate is confirmed.
+GPU_RATE_EUR = 2.0
+CPU_RATE_EUR = GPU_RATE_EUR / 10
 
 
 def ssh(cmd: str) -> str:
@@ -184,25 +193,29 @@ def categorize_cpu(kv: dict) -> str:
 
 def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
          my_gpu_nodes=None, my_cpu_per_node=None, my_job_nodes=None,
-         my_gpu_counts=None, tracked_gpu_counts=None, tracked_cpu_per_node=None):
+         my_gpu_counts=None, tracked_gpu_counts=None, tracked_cpu_per_node=None,
+         my_usage_cost=None, tracked_usage_cost=None):
     if my_gpu_nodes is None: my_gpu_nodes = set()
     if my_cpu_per_node is None: my_cpu_per_node = {}
     if my_job_nodes is None: my_job_nodes = set()
     if my_gpu_counts is None: my_gpu_counts = {}
     if tracked_gpu_counts is None: tracked_gpu_counts = {}
     if tracked_cpu_per_node is None: tracked_cpu_per_node = {}
-    fig = plt.figure(figsize=(15, 11), dpi=120)
-    # 3 rows: H100 grid+summary, proxima-cpu grid+summary, jobs.
+    if my_usage_cost is None: my_usage_cost = {}
+    if tracked_usage_cost is None: tracked_usage_cost = {}
+    fig = plt.figure(figsize=(15, 13), dpi=120)
+    # 4 rows: H100 grid+summary, proxima-cpu grid+summary, usage/cost, jobs.
     # Reservations table dropped — the grid already encodes reservation
     # status via border color (orange=reserved, purple=llm, red=drain).
-    gs = fig.add_gridspec(3, 2, width_ratios=[3, 2],
-                          height_ratios=[8, 6, 3],
-                          hspace=0.45, wspace=0.18)
+    gs = fig.add_gridspec(4, 2, width_ratios=[3, 2],
+                          height_ratios=[8, 6, 2, 3],
+                          hspace=0.55, wspace=0.18)
     ax_grid = fig.add_subplot(gs[0, 0])
     ax_summary = fig.add_subplot(gs[0, 1])
     ax_cpu_grid = fig.add_subplot(gs[1, 0])
     ax_cpu_summary = fig.add_subplot(gs[1, 1])
-    ax_jobs = fig.add_subplot(gs[2, :])
+    ax_usage = fig.add_subplot(gs[2, :])
+    ax_jobs = fig.add_subplot(gs[3, :])
     ax_rsv = None   # reservations no longer rendered; kept var for compat
 
     # --- Node grid ---
@@ -448,6 +461,35 @@ def draw(nodes, rsvs, myjobs, blocking_by_rsv, llm_nodes,
                         transform=ax_cpu_summary.transAxes)
 
     # --- Reservations: NOT rendered (grid encodes via border color) ---
+
+    # --- GPU/CPU usage & cost (sacct, trailing day/week/month) ---
+    ax_usage.axis("off")
+
+    def _usage_row(label, cost):
+        d = cost.get("day", {}); w = cost.get("week", {}); m = cost.get("month", {})
+        return [label,
+                f"{d.get('gpu_hr', 0):.2f}", f"{d.get('cpu_hr', 0):.1f}", f"€{d.get('cost_eur', 0):.2f}",
+                f"{w.get('gpu_hr', 0):.2f}", f"{w.get('cpu_hr', 0):.1f}", f"€{w.get('cost_eur', 0):.2f}",
+                f"{m.get('gpu_hr', 0):.2f}", f"{m.get('cpu_hr', 0):.1f}", f"€{m.get('cost_eur', 0):.2f}"]
+
+    usage_rows = [
+        ["User", "Day GPU-hr", "Day CPU-hr", "Day €",
+         "Week GPU-hr", "Week CPU-hr", "Week €",
+         "Month GPU-hr", "Month CPU-hr", "Month €"],
+        _usage_row(f"Me ({MY_USERNAME})", my_usage_cost),
+        _usage_row(TRACKED_USER, tracked_usage_cost),
+    ]
+    tbl_usage = ax_usage.table(cellText=usage_rows, loc="upper left", cellLoc="center",
+                               colWidths=[0.12, 0.10, 0.10, 0.08, 0.10, 0.10, 0.08, 0.10, 0.10, 0.08])
+    tbl_usage.auto_set_font_size(False)
+    tbl_usage.set_fontsize(8.5)
+    for i in range(len(usage_rows[0])):
+        tbl_usage[0, i].set_facecolor("#dddddd")
+        tbl_usage[0, i].set_text_props(fontweight="bold")
+    ax_usage.set_title(
+        "GPU/CPU usage & cost (sacct, trailing windows from now — GPU rate €2.00/hr confirmed; "
+        "CPU rate €0.20/hr is an ASSUMPTION, not a confirmed PSNC price)",
+        fontsize=9, loc="left")
 
     # --- My jobs ---
     ax_jobs.axis("off")
@@ -735,7 +777,7 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict, tracked_cpu_per_node: dict =
 def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
                my_gpus_per_node, gpu_util_rows, refresh_secs,
                my_cpu_per_node=None, my_job_nodes=None, tracked_gpus_per_node=None,
-               tracked_cpu_per_node=None):
+               tracked_cpu_per_node=None, my_usage_cost=None, tracked_usage_cost=None):
     if my_cpu_per_node is None:
         my_cpu_per_node = {}
     if my_job_nodes is None:
@@ -744,6 +786,10 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
         tracked_gpus_per_node = {}
     if tracked_cpu_per_node is None:
         tracked_cpu_per_node = {}
+    if my_usage_cost is None:
+        my_usage_cost = {}
+    if tracked_usage_cost is None:
+        tracked_usage_cost = {}
     """Render the cluster grid + single-line stacked totals + reservations
     + my jobs. Each node is a 4-line bordered box with edge-to-edge fill."""
     gpu_nodes = [n for n in nodes_data if "h100" in n.get("Gres", "")]
@@ -957,6 +1003,21 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
     # Reservations table removed — the H100 grid already encodes reservation
     # state via border colors (purple=llm, orange=other-reserved, red=drain).
 
+    # GPU/CPU usage & cost (sacct, trailing day/week/month from now)
+    out.append("\x1b[1mGPU/CPU usage & cost\x1b[0m  "
+               "(GPU €2.00/hr confirmed; CPU €0.20/hr is an ASSUMPTION, not a confirmed PSNC price):")
+    out.append(f"  {'':<16} {'Day GPU-hr':>10} {'CPU-hr':>8} {'€':>8}   "
+               f"{'Week GPU-hr':>11} {'CPU-hr':>8} {'€':>8}   "
+               f"{'Month GPU-hr':>12} {'CPU-hr':>8} {'€':>8}")
+    for label, cost in [(f"Me ({MY_USERNAME})", my_usage_cost), (TRACKED_USER, tracked_usage_cost)]:
+        d, w, m = cost.get("day", {}), cost.get("week", {}), cost.get("month", {})
+        out.append(
+            f"  {label:<16} "
+            f"{d.get('gpu_hr', 0):>10.2f} {d.get('cpu_hr', 0):>8.1f} {d.get('cost_eur', 0):>7.2f}€   "
+            f"{w.get('gpu_hr', 0):>11.2f} {w.get('cpu_hr', 0):>8.1f} {w.get('cost_eur', 0):>7.2f}€   "
+            f"{m.get('gpu_hr', 0):>12.2f} {m.get('cpu_hr', 0):>8.1f} {m.get('cost_eur', 0):>7.2f}€")
+    out.append("")
+
     # My jobs
     out.append("\x1b[1mMy jobs:\x1b[0m")
     if myjobs:
@@ -1031,10 +1092,52 @@ def gather_my_gpu_util(my_jobids: list) -> list:
     return rows
 
 
+def gather_usage_cost(username: str) -> dict:
+    """sacct-based GPU-hour / CPU-hour / cost rollup for `username`, over
+    three trailing windows anchored at now: day (24h), week (7d), month (30d).
+    Each window is CUMULATIVE (e.g. "month" includes everything in "week"
+    and "day"), not a distinct non-overlapping bucket -- these are three
+    different lookback horizons from right now, not three separate periods.
+    Counts elapsed time regardless of job outcome (COMPLETED/CANCELLED/
+    TIMEOUT/FAILED all consumed real allocated time)."""
+    text = ssh(f'sacct -u {username} -S now-30days -E now --allocations '
+               f'--parsable2 --noheader -o Start,AllocTRES,ElapsedRaw')
+    now = dt.datetime.now()
+    windows = {"day": dt.timedelta(days=1), "week": dt.timedelta(days=7), "month": dt.timedelta(days=30)}
+    totals = {w: {"gpu_hr": 0.0, "cpu_hr": 0.0} for w in windows}
+    for line in text.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        start_s, alloctres, elapsed_s = parts[0], parts[1], parts[2]
+        try:
+            start = dt.datetime.strptime(start_s, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            continue
+        try:
+            elapsed = int(elapsed_s)
+        except ValueError:
+            elapsed = 0
+        gpu_m = re.search(r"gres/gpu(?::[a-zA-Z0-9]+)?=(\d+)", alloctres)
+        n_gpu = int(gpu_m.group(1)) if gpu_m else 0
+        cpu_m = re.search(r"(?:^|,)cpu=(\d+)", alloctres)
+        n_cpu = int(cpu_m.group(1)) if cpu_m else 0
+        age = now - start
+        for wname, wdelta in windows.items():
+            if dt.timedelta(0) <= age <= wdelta:
+                totals[wname]["gpu_hr"] += n_gpu * elapsed / 3600.0
+                totals[wname]["cpu_hr"] += n_cpu * elapsed / 3600.0
+    for w in totals:
+        g, c = totals[w]["gpu_hr"], totals[w]["cpu_hr"]
+        totals[w]["cost_eur"] = g * GPU_RATE_EUR + c * CPU_RATE_EUR
+    return totals
+
+
 def gather():
     """Run the SSH queries and parse. Returns
     (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus_per_node, gpu_util_rows,
-     my_cpu_cores_per_node, my_job_nodes, tracked_gpus_per_node, tracked_cpu_per_node)."""
+     my_cpu_cores_per_node, my_job_nodes, tracked_gpus_per_node, tracked_cpu_per_node,
+     my_usage_cost, tracked_usage_cost)."""
     node_text = ssh("scontrol -o show node")
     rsv_text = ssh("scontrol -o show reservations")
     sq_text = ssh('squeue -u $USER --states=PENDING,RUNNING -o "%i|%T|%j|%P|%D|%M|%R" -h')
@@ -1129,9 +1232,13 @@ def gather():
             if nm in cpu_node_names and cpus_per_node > 0:
                 tracked_cpu_per_node[nm] = tracked_cpu_per_node.get(nm, 0) + cpus_per_node
 
+    my_usage_cost = gather_usage_cost(MY_USERNAME)
+    tracked_usage_cost = gather_usage_cost(TRACKED_USER)
+
     return (nodes, rsvs, myjobs, blocking, llm_nodes,
             my_gpus_per_node, gpu_util_rows, my_cpu_cores_per_node, my_job_nodes,
-            tracked_gpus_per_node, tracked_cpu_per_node)
+            tracked_gpus_per_node, tracked_cpu_per_node,
+            my_usage_cost, tracked_usage_cost)
 
 
 def main():
@@ -1145,10 +1252,12 @@ def main():
 
     if args.watch <= 0:
         # One-shot: just the PNG.
-        nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes, tracked_gpus, tracked_cpu = gather()
+        (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, _util, my_cpu, my_job_nodes,
+         tracked_gpus, tracked_cpu, my_cost, tracked_cost) = gather()
         draw(nodes, rsvs, myjobs, blocking, llm_nodes,
              my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
-             tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
+             tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu,
+             my_usage_cost=my_cost, tracked_usage_cost=tracked_cost)
         print(f"Wrote {OUT_PNG}", file=sys.stderr)
         subprocess.run(["open", str(OUT_PNG)], check=False)
         return
@@ -1158,16 +1267,19 @@ def main():
     try:
         while True:
             try:
-                data = gather()  # 11-tuple
-                nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes, tracked_gpus, tracked_cpu = data
+                data = gather()  # 13-tuple
+                (nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes,
+                 tracked_gpus, tracked_cpu, my_cost, tracked_cost) = data
                 render_tui(nodes, rsvs, myjobs, blocking, llm_nodes,
                            my_gpus, util, refresh_secs=args.watch,
                            my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes,
-                           tracked_gpus_per_node=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
+                           tracked_gpus_per_node=tracked_gpus, tracked_cpu_per_node=tracked_cpu,
+                           my_usage_cost=my_cost, tracked_usage_cost=tracked_cost)
                 if not args.no_png:
                     draw(nodes, rsvs, myjobs, blocking, llm_nodes,
                          my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
-                         tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu)
+                         tracked_gpu_counts=tracked_gpus, tracked_cpu_per_node=tracked_cpu,
+                         my_usage_cost=my_cost, tracked_usage_cost=tracked_cost)
             except subprocess.CalledProcessError as e:
                 sys.stderr.write(f"\n[WARN {dt.datetime.now():%H:%M:%S}] "
                                  f"ssh failed: {e}\n")
