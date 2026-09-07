@@ -542,10 +542,12 @@ CPU_BG = CAT_BG
 
 
 MY_FG = "\x1b[1m\x1b[38;5;27m"   # deep-blue bold — border color for "my job here"
+TRACKED_BG = "\x1b[48;5;200m"    # magenta — TRACKED_USER's GPU slots inside a cell
+TRACKED_FG = "\x1b[1m\x1b[38;5;200m"   # magenta bold — border color for "TRACKED_USER's node"
 
 
 def render_cell(n: dict, llm_nodes: set, my_gpus_per_node: dict,
-                my_job_nodes: set = None) -> tuple[str, str, str, str]:
+                my_job_nodes: set = None, tracked_gpus_per_node: dict = None) -> tuple[str, str, str, str]:
     """Render one node as 4 ANSI-escaped strings (top, mid1, mid2, bottom).
     Heavy bold border in category color. Interior is 4 chars wide, 2 lines
     tall, edge-to-edge: N chars colored (= N GPUs used) + (4-N) chars white.
@@ -572,14 +574,21 @@ def render_cell(n: dict, llm_nodes: set, my_gpus_per_node: dict,
     n_filled = alloc if total else 0
     n_free = INTERIOR_W - n_filled
     n_mine = min(n_filled, my_gpus_per_node.get(n["NodeName"], 0))
-    n_others = max(0, n_filled - n_mine)
+    n_tracked = min(n_filled - n_mine, (tracked_gpus_per_node or {}).get(n["NodeName"], 0))
+    n_others = max(0, n_filled - n_mine - n_tracked)
     # TWO consistencies:
     #  (1) blue BORDER = my NODE  -> #blue-bordered cells == my node count
     #      (row "5 nodes" <=> 5 blue borders, incl. gpu:0 jobs).
     #  (2) blue BLOCKS = my GPUs  -> #blue blocks == my GPU count, summed across
     #      blue cells == my total GPUs (row "0 gpu" <=> 0 blue blocks).
-    if my_job_nodes and n["NodeName"] in my_job_nodes:
+    # Same pair of consistencies for magenta = TRACKED_USER, checked only when
+    # the node isn't already mine (mine takes priority on the border).
+    is_my_node = bool(my_job_nodes and n["NodeName"] in my_job_nodes)
+    is_tracked_node = (not is_my_node) and n_tracked > 0
+    if is_my_node:
         fg = MY_FG
+    elif is_tracked_node:
+        fg = TRACKED_FG
 
     label = f"g{nid}"
     if len(label) > INTERIOR_W:
@@ -593,6 +602,10 @@ def render_cell(n: dict, llm_nodes: set, my_gpus_per_node: dict,
     if n_mine > 0:
         info_mine = (MY_BG + DIGIT_STYLE + str(n_mine) +
                      (" " * (n_mine - 1)) + ANSI_RESET)
+    info_tracked = ""
+    if n_tracked > 0:
+        info_tracked = (TRACKED_BG + DIGIT_STYLE + str(n_tracked) +
+                        (" " * (n_tracked - 1)) + ANSI_RESET)
     info_others = ""
     if n_others > 0:
         info_others = (bg + DIGIT_STYLE + str(n_others) +
@@ -607,11 +620,12 @@ def render_cell(n: dict, llm_nodes: set, my_gpus_per_node: dict,
 
     # ---- plain line (same fills, no markers) ----
     plain_mine = (MY_BG + (" " * n_mine) + ANSI_RESET) if n_mine > 0 else ""
+    plain_tracked = (TRACKED_BG + (" " * n_tracked) + ANSI_RESET) if n_tracked > 0 else ""
     plain_others = (bg + (" " * n_others) + ANSI_RESET) if n_others > 0 else ""
     plain_free = (WHITE_BG + (" " * n_free) + ANSI_RESET) if n_free > 0 else ""
 
-    mid1 = f"{BOLD}{fg}┃{ANSI_RESET}{info_mine}{info_others}{info_free}{BOLD}{fg}┃{ANSI_RESET}"
-    mid2 = f"{BOLD}{fg}┃{ANSI_RESET}{plain_mine}{plain_others}{plain_free}{BOLD}{fg}┃{ANSI_RESET}"
+    mid1 = f"{BOLD}{fg}┃{ANSI_RESET}{info_mine}{info_tracked}{info_others}{info_free}{BOLD}{fg}┃{ANSI_RESET}"
+    mid2 = f"{BOLD}{fg}┃{ANSI_RESET}{plain_mine}{plain_tracked}{plain_others}{plain_free}{BOLD}{fg}┃{ANSI_RESET}"
 
     bottom = f"{BOLD}{fg}┗{'━' * INTERIOR_W}┛{ANSI_RESET}"
     return top, mid1, mid2, bottom
@@ -694,11 +708,13 @@ def render_cpu_cell(n: dict, my_cpu_per_node: dict) -> tuple[str, str, str, str]
 
 def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
                my_gpus_per_node, gpu_util_rows, refresh_secs,
-               my_cpu_per_node=None, my_job_nodes=None):
+               my_cpu_per_node=None, my_job_nodes=None, tracked_gpus_per_node=None):
     if my_cpu_per_node is None:
         my_cpu_per_node = {}
     if my_job_nodes is None:
         my_job_nodes = set()
+    if tracked_gpus_per_node is None:
+        tracked_gpus_per_node = {}
     """Render the cluster grid + single-line stacked totals + reservations
     + my jobs. Each node is a 4-line bordered box with edge-to-edge fill."""
     gpu_nodes = [n for n in nodes_data if "h100" in n.get("Gres", "")]
@@ -724,7 +740,7 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
                 blank = " " * (CELL_W + GAP)
                 l1 += blank; l2 += blank; l3 += blank; l4 += blank
                 continue
-            t, m1, m2, b = render_cell(gpu_nodes[idx], llm_nodes, my_gpus_per_node, my_job_nodes)
+            t, m1, m2, b = render_cell(gpu_nodes[idx], llm_nodes, my_gpus_per_node, my_job_nodes, tracked_gpus_per_node)
             sep = " " * GAP
             l1 += t + sep
             l2 += m1 + sep
@@ -808,6 +824,8 @@ def render_tui(nodes_data, rsvs_data, myjobs, blocking, llm_nodes,
         legend_parts.append(f"{color}  {ANSI_RESET} {lab}")
     legend_parts.append(f"{MY_BG}  {ANSI_RESET} my GPU")
     legend_parts.append(f"{MY_FG}┃┃{ANSI_RESET} my-GPU border")
+    legend_parts.append(f"{TRACKED_BG}  {ANSI_RESET} {TRACKED_USER} GPU")
+    legend_parts.append(f"{TRACKED_FG}┃┃{ANSI_RESET} {TRACKED_USER} border")
     legend_parts.append(f"{WHITE_BG}\x1b[1m\x1b[38;5;16mxx{ANSI_RESET} blocked-idle")
     legend_line = "   ".join(legend_parts)
     # Legend sits ABOVE the bar title (right under the grid).
@@ -1103,10 +1121,10 @@ def main():
             try:
                 data = gather()  # 10-tuple
                 nodes, rsvs, myjobs, blocking, llm_nodes, my_gpus, util, my_cpu, my_job_nodes, tracked_gpus = data
-                # render_tui still uses 7-arg legacy signature for back-compat.
                 render_tui(nodes, rsvs, myjobs, blocking, llm_nodes,
                            my_gpus, util, refresh_secs=args.watch,
-                           my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes)
+                           my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes,
+                           tracked_gpus_per_node=tracked_gpus)
                 if not args.no_png:
                     draw(nodes, rsvs, myjobs, blocking, llm_nodes,
                          my_gpu_nodes=set(my_gpus.keys()), my_cpu_per_node=my_cpu, my_job_nodes=my_job_nodes, my_gpu_counts=my_gpus,
