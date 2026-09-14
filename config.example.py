@@ -14,7 +14,7 @@ SSH_KEY = Path.home() / ".ssh" / "id_ed25519_psnc"
 
 # Your PCSS account(s) (from `sacctmgr show assoc user=$USER`), used to
 # decide which running jobs count as "mine" in the usage/cost table.
-MY_ACCOUNTS = ("pl0827-01", "pl0910-01")
+MY_ACCOUNTS = ("your-account-01",)
 
 # Must match the username in SSH_HOST -- used for sacct usage/cost lookups.
 MY_USERNAME = "your-username"
