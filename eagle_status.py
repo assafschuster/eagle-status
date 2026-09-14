@@ -25,14 +25,18 @@ from matplotlib.patches import Rectangle
 
 OUT_PNG = Path.home() / "Desktop" / "eagle_proxima_status.png"
 OUT_HTML = Path.home() / "Desktop" / "eagle_proxima_status.html"
-SSH_HOST = "assafschuster@eagle.man.poznan.pl"
-SSH_KEY = Path.home() / ".ssh" / "id_ed25519_psnc"
-MY_ACCOUNTS = ("pl0827-01", "pl0910-01")
-MY_USERNAME = "assafschuster"   # matches SSH_HOST's login -- used for sacct usage/cost lookups
-# Teammate(s) to highlight separately from "mine" and from everyone else --
-# e.g. so it's obvious at a glance which GPUs a specific collaborator is
-# using, the same way "my" GPUs already get their own border color.
-TRACKED_USER = "yara-sh"
+
+# Personal identity (SSH host/key, PCSS accounts, tracked teammate) lives in
+# config_local.py, which is gitignored -- copy config.example.py to
+# config_local.py and fill in your own values.
+try:
+    from config_local import SSH_HOST, SSH_KEY, MY_ACCOUNTS, MY_USERNAME, TRACKED_USER
+except ImportError:
+    sys.exit(
+        "Missing config_local.py. Copy config.example.py to config_local.py "
+        "in this same directory and fill in your own SSH_HOST/SSH_KEY/"
+        "MY_USERNAME/TRACKED_USER."
+    )
 
 # Both rates are now confirmed real PSNC prices (as of 2026-09-07) -- note
 # they're in DIFFERENT currencies and are deliberately NOT converted/summed
